@@ -1,15 +1,16 @@
+// Comandos de inicio y verificación
 s.quit;
 OSCdef.freeAll;
 
 s.boot;                  // Iniciar servidor
 NetAddr.localAddr.port;  // Ver puerto actual
 thisProcess.openPorts;   // Ver puertos abiertos
-s.serverRunning;         // Estado del servidor
-OSCFunc.trace(false);     // Activar el debugging de OSC si es necesario
-OSCdef.all;              // Ver todos los OSCdefs activos
+s.addr;                  // Ver información del servidor
+s.serverRunning;        // Estado del servidor
+OSCFunc.trace(true);    // Activar el debugging de OSC
+OSCdef.all;             // Ver todos los OSCdefs activos
 
-
-// Sistema completo de SuperCollider con OSC
+// Sistema completo de SuperCollider con OSC y dos buffers
 (
 // 0. Configuración inicial y debugging
 s.quit;
@@ -21,7 +22,6 @@ s.options.maxNodes = 1024 * 32;
 s.options.numInputBusChannels = 2;
 s.options.numOutputBusChannels = 2;
 
-
 // Variables globales para el sistema OSC
 ~lastOSCTime = 0;
 ~isPlaying = false;
@@ -31,7 +31,7 @@ s.options.numOutputBusChannels = 2;
 // Iniciar el servidor
 s.waitForBoot({
     "Servidor iniciado correctamente".postln;
-    s.meter;
+//    s.meter;
     s.volume.volume = 0;
 
     // 1. Cargar buffers
@@ -45,13 +45,13 @@ s.waitForBoot({
     // Cargar buffers
     ~buffers1 = PathName(~folder1).entries.collect { |path|
         var buf = Buffer.read(s, path.fullPath);
-        "Cargando buffer: %\n".format(path.fileName).post;
+        "Cargando buffer 1: %\n".format(path.fileName).post;
         buf
     };
 
     ~buffers2 = PathName(~folder2).entries.collect { |path|
         var buf = Buffer.read(s, path.fullPath);
-        "Cargando buffer: %\n".format(path.fileName).post;
+        "Cargando buffer 2: %\n".format(path.fileName).post;
         buf
     };
 
@@ -66,6 +66,9 @@ s.waitForBoot({
             ~isPlaying = false;
         };
     };
+
+    // Configuración del receptor OSC
+    thisProcess.openUDPPort(57120); // Abre explícitamente el puerto 57120
 
     // Definir receptor OSC con monitoreo
     OSCdef(\receiveInputs, { |msg, time, addr, port|
@@ -104,9 +107,9 @@ s.waitForBoot({
         };
     }).play;
 
-    // 3. SynthDef
+    // 3. SynthDef modificado para dos buffers
     SynthDef(\bufferPlayerExtended, {
-        |buf, amp = 0.5, pan = 0, revMix = 0.2,
+        |buf1, buf2, mixRatio = 0.5, amp = 0.5, pan = 0, revMix = 0.2,
         delayTime = 0.5, feedback = 0.3, out = 0,
         fadeIn = 0.1, fadeOut = 0.1, gate = 1,
         playRate = 1.0, reverse = 0,
@@ -117,7 +120,7 @@ s.waitForBoot({
         ringModFreq = 0, ringModAmt = 0,
         crushAmt = 0|
 
-        var sig, delayed, env, noise, direction, crushedSig;
+        var sig1, sig2, sig, delayed, env, noise, direction, crushedSig;
 
         direction = (1 - reverse * 2);
 
@@ -127,12 +130,23 @@ s.waitForBoot({
             doneAction: 2
         );
 
-        sig = PlayBuf.ar(2, buf,
-            BufRateScale.kr(buf) * playRate * direction *
+        // Reproducir ambos buffers
+        sig1 = PlayBuf.ar(2, buf1,
+            BufRateScale.kr(buf1) * playRate * direction *
             (1 + (SinOsc.kr(wobbleRate) * wobbleDepth)),
             doneAction: 0
         );
 
+        sig2 = PlayBuf.ar(2, buf2,
+            BufRateScale.kr(buf2) * playRate * direction *
+            (1 + (SinOsc.kr(wobbleRate) * wobbleDepth)),
+            doneAction: 0
+        );
+
+        // Mezclar los dos signals usando XFade2
+        sig = XFade2.ar(sig1, sig2, mixRatio * 2 - 1);
+
+        // Procesamiento de efectos
         sig = PitchShift.ar(sig,
             windowSize: 0.2,
             pitchRatio: pitchShift,
@@ -180,13 +194,18 @@ s.waitForBoot({
         Out.ar(out, sig);
     }).add;
 
-    // 4. Patrón principal
+    // 4. Patrón principal actualizado para dos buffers
     Pdef(\pattern, Pbind(
         \instrument, \bufferPlayerExtended,
-        \buf, Pfunc({ |ev|
+        \buf1, Pfunc({ |ev|
             var bufSelect = ~oscInput[0].linlin(0, 1, 0, ~buffers1.size-1).floor;
             ~buffers1[bufSelect].bufnum;
         }),
+        \buf2, Pfunc({ |ev|
+            var bufSelect = ~oscInput[0].linlin(0, 1, 0, ~buffers2.size-1).floor;
+            ~buffers2[bufSelect].bufnum;
+        }),
+        \mixRatio, Pfunc({ ~oscInput[1] }), // Usar el segundo valor OSC para mezclar
 
         \amp, Pfunc({ ~oscInput[0].linlin(0, 1, 0.2, 0.7) }),
         \pan, Pfunc({ ~oscInput[1].linlin(0, 1, -1, 1) }),
@@ -203,9 +222,9 @@ s.waitForBoot({
             var index = (~oscInput[0] * rates.size).floor;
             rates[index];
         }),
-        \reverse, Pfunc({
-            if(~oscInput[1] > 0.7) { 1 } { 0 }
-        }),
+//        \reverse, Pfunc({
+//            if(~oscInput[1] > 0.7) { 1 } { 0 }
+//        }),
         \distAmt, Pfunc({ ~oscInput[0].linlin(0, 1, 0, 0.7) }),
         \noiseAmt, Pfunc({ ~oscInput[1].linlin(0, 1, 0, 0.2) }),
         \crushAmt, Pfunc({ ~oscInput[0].linlin(0, 1, 0, 0.8) }),
@@ -245,12 +264,14 @@ s.waitForBoot({
 
     // 7. Funciones de control
     ~startAll = {
-        if(~buffers1.isEmpty) {
-            "¡No hay buffers para reproducir!".postln;
+        if(~buffers1.isEmpty || ~buffers2.isEmpty) {
+            "¡No hay suficientes buffers para reproducir!".postln;
         } {
             "Iniciando reproducción...".postln;
             "Estado OSC: %\n".format(~oscInput).post;
-            "Buffers disponibles: %\n".format(~buffers1.size).post;
+            "Buffers disponibles - Grupo 1: %, Grupo 2: %\n".format(
+                ~buffers1.size, ~buffers2.size
+            ).post;
 
             Pdef(\pattern).play;
             ~routine.reset.play;
@@ -264,17 +285,17 @@ s.waitForBoot({
     };
 
     // Test inicial de audio
-    {
-        SinOsc.ar(440, 0, 0.1) ! 2 * Line.kr(1, 0, 1, doneAction: 2)
-    }.play;
+//    {
+//        SinOsc.ar(440, 0, 0.1) ! 2 * Line.kr(1, 0, 1, doneAction: 2)
+//    }.play;
 
     "Inicialización completa.".postln;
     "Sistema esperando datos OSC...".postln;
     "El sistema iniciará automáticamente al recibir datos OSC".postln;
     "y se detendrá después de % segundos sin datos.".format(~timeoutThreshold).postln;
+    "Control de mezcla: OSC[1] controla la mezcla entre los dos buffers".postln;
 });
 )
-
 
 // Para limpiar todo
 ~cleanup = {
