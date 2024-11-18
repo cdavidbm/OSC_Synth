@@ -7,7 +7,7 @@ NetAddr.localAddr.port;  // Ver puerto actual
 thisProcess.openPorts;   // Ver puertos abiertos
 s.addr;                  // Ver información del servidor
 s.serverRunning;        // Estado del servidor
-OSCFunc.trace(true);    // Activar el debugging de OSC
+OSCFunc.trace(false);    // Activar el debugging de OSC
 OSCdef.all;             // Ver todos los OSCdefs activos
 
 // Sistema completo de SuperCollider con OSC y dos buffers
@@ -222,9 +222,9 @@ s.waitForBoot({
             var index = (~oscInput[0] * rates.size).floor;
             rates[index];
         }),
-//        \reverse, Pfunc({
-//            if(~oscInput[1] > 0.7) { 1 } { 0 }
-//        }),
+        \reverse, Pfunc({
+            if(~oscInput[1] > 0.7) { 1 } { 0 }
+        }),
         \distAmt, Pfunc({ ~oscInput[0].linlin(0, 1, 0, 0.7) }),
         \noiseAmt, Pfunc({ ~oscInput[1].linlin(0, 1, 0, 0.2) }),
         \crushAmt, Pfunc({ ~oscInput[0].linlin(0, 1, 0, 0.8) }),
